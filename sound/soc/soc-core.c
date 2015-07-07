@@ -55,7 +55,6 @@ EXPORT_SYMBOL_GPL(snd_soc_debugfs_root);
 #endif
 
 static DEFINE_MUTEX(client_mutex);
-static LIST_HEAD(card_list);
 static LIST_HEAD(dai_list);
 static LIST_HEAD(platform_list);
 static LIST_HEAD(codec_list);
@@ -850,15 +849,9 @@ static int soc_bind_dai_link(struct snd_soc_card *card, int num)
 	struct snd_soc_dai *codec_dai, *cpu_dai;
 	const char *platform_name;
 
-	if (rtd->complete)
-		return 1;
 	dev_dbg(card->dev, "binding %s at idx %d\n", dai_link->name, num);
 
-	/* do we already have the CPU DAI for this link ? */
-	if (rtd->cpu_dai) {
-		goto find_codec;
-	}
-	/* no, then find CPU DAI from registered DAIs*/
+	/* Find CPU DAI from registered DAIs*/
 	list_for_each_entry(cpu_dai, &dai_list, list) {
 		if (dai_link->cpu_dai_of_node) {
 			if (cpu_dai->dev->of_node != dai_link->cpu_dai_of_node)
@@ -869,15 +862,13 @@ static int soc_bind_dai_link(struct snd_soc_card *card, int num)
 		}
 
 		rtd->cpu_dai = cpu_dai;
-		goto find_codec;
 	}
-	dev_dbg(card->dev, "CPU DAI %s not registered\n",
-			dai_link->cpu_dai_name);
 
-find_codec:
-	/* do we already have the CODEC for this link ? */
-	if (rtd->codec) {
-		goto find_platform;
+	if (!rtd->cpu_dai) {
+		dev_dbg(card->dev, "CPU DAI %s not registered\n",
+			dai_link->cpu_dai_name);
+		return -EPROBE_DEFER;
+
 	}
 
 	/* no, then find CODEC from registered CODECs*/
@@ -902,21 +893,21 @@ find_codec:
 					dai_link->codec_dai_name)) {
 
 				rtd->codec_dai = codec_dai;
-				goto find_platform;
 			}
 		}
-		dev_dbg(card->dev, "CODEC DAI %s not registered\n",
+		if (!rtd->codec_dai) {
+			dev_dbg(card->dev, "CODEC DAI %s not registered\n",
 				dai_link->codec_dai_name);
+			return -EPROBE_DEFER;
+		}
 
-		goto find_platform;
 	}
-	dev_dbg(card->dev, "CODEC %s not registered\n",
-			dai_link->codec_name);
 
-find_platform:
-	/* do we need a platform? */
-	if (rtd->platform)
-		goto out;
+	if (!rtd->codec) {
+		dev_dbg(card->dev, "CODEC %s not registered\n",
+			dai_link->codec_name);
+		return -EPROBE_DEFER;
+	}
 
 	/* if there's no platform we match on the empty platform */
 	platform_name = dai_link->platform_name;
@@ -935,20 +926,17 @@ find_platform:
 		}
 
 		rtd->platform = platform;
-		goto out;
 	}
-
-	dev_dbg(card->dev, "platform %s not registered\n",
+	if (!rtd->platform) {
+		dev_dbg(card->dev, "platform %s not registered\n",
 			dai_link->platform_name);
+
+		return -EPROBE_DEFER;
+	}
+	card->num_rtd++;
+
 	return 0;
 
-out:
-	/* mark rtd as complete if we found all 4 of our client devices */
-	if (rtd->codec && rtd->codec_dai && rtd->platform && rtd->cpu_dai) {
-		rtd->complete = 1;
-		card->num_rtd++;
-	}
-	return 1;
 }
 
 static void soc_remove_codec(struct snd_soc_codec *codec)
@@ -1410,6 +1398,20 @@ static void soc_unregister_ac97_dai_link(struct snd_soc_codec *codec)
 }
 #endif
 
+static int soc_check_aux_dev(struct snd_soc_card *card, int num)
+{
+	struct snd_soc_aux_dev *aux_dev = &card->aux_dev[num];
+	struct snd_soc_codec *codec;
+
+	/* find CODEC from registered CODECs*/
+	list_for_each_entry(codec, &codec_list, list) {
+		if (!strcmp(codec->name, aux_dev->codec_name))
+			return 0;
+	}
+
+	return -EPROBE_DEFER;
+}
+
 static int soc_probe_aux_dev(struct snd_soc_card *card, int num)
 {
 	struct snd_soc_aux_dev *aux_dev = &card->aux_dev[num];
@@ -1430,7 +1432,7 @@ static int soc_probe_aux_dev(struct snd_soc_card *card, int num)
 	}
 	/* codec not found */
 	dev_err(card->dev, "asoc: codec %s not found", aux_dev->codec_name);
-	goto out;
+	return -EPROBE_DEFER;
 
 found:
 	ret = soc_probe_codec(card, codec);
@@ -1570,7 +1572,7 @@ static void soc_init_card_aif_channel_map(struct snd_soc_card *card)
 }
 
 
-static void snd_soc_instantiate_card(struct snd_soc_card *card)
+static int snd_soc_instantiate_card(struct snd_soc_card *card)
 {
 	struct snd_soc_codec *codec;
 	struct snd_soc_codec_conf *codec_conf;
@@ -1580,19 +1582,19 @@ static void snd_soc_instantiate_card(struct snd_soc_card *card)
 
 	mutex_lock(&card->mutex);
 
-	if (card->instantiated) {
-		mutex_unlock(&card->mutex);
-		return;
-	}
 
 	/* bind DAIs */
-	for (i = 0; i < card->num_links; i++)
-		soc_bind_dai_link(card, i);
+	for (i = 0; i < card->num_links; i++) {
+		ret = soc_bind_dai_link(card, i);
+		if (ret != 0)
+			goto base_error;
+	}
 
-	/* bind completed ? */
-	if (card->num_rtd != card->num_links) {
-		mutex_unlock(&card->mutex);
-		return;
+	/* check aux_devs too */
+	for (i = 0; i < card->num_aux_devs; i++) {
+		ret = soc_check_aux_dev(card, i);
+		if (ret != 0)
+			goto base_error;
 	}
 
 	/* initialize the register cache for each available codec */
@@ -1612,10 +1614,8 @@ static void snd_soc_instantiate_card(struct snd_soc_card *card)
 			}
 		}
 		ret = snd_soc_init_codec_cache(codec, compress_type);
-		if (ret < 0) {
-			mutex_unlock(&card->mutex);
-			return;
-		}
+		if (ret < 0)
+			goto base_error;
 	}
 
 	/* card bind complete so register a sound card */
@@ -1624,8 +1624,7 @@ static void snd_soc_instantiate_card(struct snd_soc_card *card)
 	if (ret < 0) {
 		printk(KERN_ERR "asoc: can't create sound card for card %s\n",
 			card->name);
-		mutex_unlock(&card->mutex);
-		return;
+		goto base_error;
 	}
 	card->snd_card->dev = card->dev;
 
@@ -1762,7 +1761,7 @@ static void snd_soc_instantiate_card(struct snd_soc_card *card)
 	card->instantiated = 1;
 	snd_soc_dapm_sync(&card->dapm);
 	mutex_unlock(&card->mutex);
-	return;
+	return 0;
 
 probe_aux_dev_err:
 	for (i = 0; i < card->num_aux_devs; i++)
@@ -1776,19 +1775,9 @@ card_probe_error:
 		card->remove(card);
 
 	snd_card_free(card->snd_card);
-
+base_error:
 	mutex_unlock(&card->mutex);
-}
-
-/*
- * Attempt to initialise any uninitialised cards.  Must be called with
- * client_mutex.
- */
-static void snd_soc_instantiate_cards(void)
-{
-	struct snd_soc_card *card;
-	list_for_each_entry(card, &card_list, list)
-		snd_soc_instantiate_card(card);
+	return ret;
 }
 
 /* probes a new socdev */
@@ -2046,6 +2035,10 @@ unsigned int snd_soc_read(struct snd_soc_codec *codec, unsigned int reg)
 {
 	unsigned int ret;
 
+	if (unlikely(!snd_card_is_online_state(codec->card->snd_card))) {
+		dev_err(codec->dev, "read 0x%02x while offline\n", reg);
+		return -ENODEV;
+	}
 	ret = codec->read(codec, reg);
 	dev_dbg(codec->dev, "read %x => %x\n", reg, ret);
 	trace_snd_soc_reg_read(codec, reg, ret);
@@ -2057,6 +2050,10 @@ EXPORT_SYMBOL_GPL(snd_soc_read);
 unsigned int snd_soc_write(struct snd_soc_codec *codec,
 			   unsigned int reg, unsigned int val)
 {
+	if (unlikely(!snd_card_is_online_state(codec->card->snd_card))) {
+		dev_err(codec->dev, "write 0x%02x while offline\n", reg);
+		return -ENODEV;
+	}
 	dev_dbg(codec->dev, "write %x = %x\n", reg, val);
 	trace_snd_soc_reg_write(codec, reg, val);
 	return codec->write(codec, reg, val);
@@ -2198,7 +2195,11 @@ EXPORT_SYMBOL_GPL(snd_soc_set_runtime_hwparams);
  * Returns 0 for success, else error.
  */
 struct snd_kcontrol *snd_soc_cnew(const struct snd_kcontrol_new *_template,
+#ifdef CONFIG_SND_SOC_WM5110
+				  void *data, const char *long_name,
+#else
 				  void *data, char *long_name,
+#endif
 				  const char *prefix)
 {
 	struct snd_kcontrol_new template;
@@ -2719,6 +2720,90 @@ int snd_soc_put_volsw(struct snd_kcontrol *kcontrol,
 }
 EXPORT_SYMBOL_GPL(snd_soc_put_volsw);
 
+#ifdef CONFIG_SND_SOC_WM5110
+/* LGE_CHANGE, yeri.lee@lge.com, 2013-10-31, wm5110 Bring up */
+/**
+ * snd_soc_get_volsw_sx - single mixer get callback
+ * @kcontrol: mixer control
+ * @ucontrol: control element information
+ *
+ * Callback to get the value of a single mixer control, or a double mixer
+ * control that spans 2 registers.
+ *
+ * Returns 0 for success.
+ */
+int snd_soc_get_volsw_sx(struct snd_kcontrol *kcontrol,
+		      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	struct soc_mixer_control *mc =
+	    (struct soc_mixer_control *)kcontrol->private_value;
+
+	unsigned int reg = mc->reg;
+	unsigned int reg2 = mc->rreg;
+	unsigned int shift = mc->shift;
+	unsigned int rshift = mc->rshift;
+	int max = mc->max;
+	int min = mc->min;
+	int mask = (1 << (fls(min + max) - 1)) - 1;
+
+	ucontrol->value.integer.value[0] =
+	    ((snd_soc_read(codec, reg) >> shift) - min) & mask;
+
+	if (snd_soc_volsw_is_stereo(mc))
+		ucontrol->value.integer.value[1] =
+			((snd_soc_read(codec, reg2) >> rshift) - min) & mask;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_get_volsw_sx);
+
+/**
+ * snd_soc_put_volsw_sx - double mixer set callback
+ * @kcontrol: mixer control
+ * @uinfo: control element information
+ *
+ * Callback to set the value of a double mixer control that spans 2 registers.
+ *
+ * Returns 0 for success.
+ */
+int snd_soc_put_volsw_sx(struct snd_kcontrol *kcontrol,
+			 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	struct soc_mixer_control *mc =
+	    (struct soc_mixer_control *)kcontrol->private_value;
+
+	unsigned int reg = mc->reg;
+	unsigned int reg2 = mc->rreg;
+	unsigned int shift = mc->shift;
+	unsigned int rshift = mc->rshift;
+	int max = mc->max;
+	int min = mc->min;
+	int mask = (1 << (fls(min + max) - 1)) - 1;
+	int err;
+	unsigned short val, val_mask, val2 = 0;
+
+	val_mask = mask << shift;
+	val = (ucontrol->value.integer.value[0] + min) & mask;
+	val = val << shift;
+
+	if (snd_soc_update_bits_locked(codec, reg, val_mask, val))
+			return err;
+
+	if (snd_soc_volsw_is_stereo(mc)) {
+		val_mask = mask << rshift;
+		val2 = (ucontrol->value.integer.value[1] + min) & mask;
+		val2 = val2 << rshift;
+
+		if (snd_soc_update_bits_locked(codec, reg2, val_mask, val2))
+			return err;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_put_volsw_sx);
+#endif
+
 /**
  * snd_soc_info_volsw_s8 - signed mixer info callback
  * @kcontrol: mixer control
@@ -2812,6 +2897,107 @@ int snd_soc_put_volsw_s8(struct snd_kcontrol *kcontrol,
 	return snd_soc_update_bits_locked(codec, reg, val_mask, val);
 }
 EXPORT_SYMBOL_GPL(snd_soc_put_volsw_s8);
+
+#ifdef CONFIG_SND_SOC_WM5110
+/* LGE_CHANGE, yeri.lee@lge.com, 2013-10-31, wm5110 Bring up */
+/**
+ * snd_soc_info_volsw_range - single mixer info callback with range.
+ * @kcontrol: mixer control
+ * @uinfo: control element information
+ *
+ * Callback to provide information, within a range, about a single
+ * mixer control.
+ *
+ * returns 0 for success.
+ */
+int snd_soc_info_volsw_range(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_info *uinfo)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	int platform_max;
+	int min = mc->min;
+
+	if (!mc->platform_max)
+		mc->platform_max = mc->max;
+	platform_max = mc->platform_max;
+
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = platform_max - min;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_info_volsw_range);
+
+/**
+ * snd_soc_put_volsw_range - single mixer put value callback with range.
+ * @kcontrol: mixer control
+ * @ucontrol: control element information
+ *
+ * Callback to set the value, within a range, for a single mixer control.
+ *
+ * Returns 0 for success.
+ */
+int snd_soc_put_volsw_range(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	unsigned int reg = mc->reg;
+	unsigned int shift = mc->shift;
+	int min = mc->min;
+	int max = mc->max;
+	unsigned int mask = (1 << fls(max)) - 1;
+	unsigned int invert = mc->invert;
+	unsigned int val, val_mask;
+
+	val = ((ucontrol->value.integer.value[0] + min) & mask);
+	if (invert)
+		val = max - val;
+	val_mask = mask << shift;
+	val = val << shift;
+
+	return snd_soc_update_bits_locked(codec, reg, val_mask, val);
+}
+EXPORT_SYMBOL_GPL(snd_soc_put_volsw_range);
+
+/**
+ * snd_soc_get_volsw_range - single mixer get callback with range
+ * @kcontrol: mixer control
+ * @ucontrol: control element information
+ *
+ * Callback to get the value, within a range, of a single mixer control.
+ *
+ * Returns 0 for success.
+ */
+int snd_soc_get_volsw_range(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	unsigned int reg = mc->reg;
+	unsigned int shift = mc->shift;
+	int min = mc->min;
+	int max = mc->max;
+	unsigned int mask = (1 << fls(max)) - 1;
+	unsigned int invert = mc->invert;
+
+	ucontrol->value.integer.value[0] =
+		(snd_soc_read(codec, reg) >> shift) & mask;
+	if (invert)
+		ucontrol->value.integer.value[0] =
+			max - ucontrol->value.integer.value[0];
+	ucontrol->value.integer.value[0] =
+		ucontrol->value.integer.value[0] - min;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_get_volsw_range);
+#endif
 
 /**
  * snd_soc_limit_volume - Set new limit to an existing volume control.
@@ -2944,6 +3130,120 @@ int snd_soc_put_volsw_2r_sx(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_soc_put_volsw_2r_sx);
+
+#ifdef CONFIG_SND_SOC_WM5110
+/* LGE_CHANGE, yeri.lee@lge.com, 2013-10-31, wm5110 Bring up */
+int snd_soc_bytes_info(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_info *uinfo)
+{
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	struct soc_bytes *params = (struct soc_bytes *)kcontrol->private_value;
+
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	uinfo->count =
+		(unsigned int)params->num_regs *
+		(unsigned int)codec->val_bytes;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_bytes_info);
+
+int snd_soc_bytes_get(struct snd_kcontrol *kcontrol,
+		      struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_bytes *params = (void *)kcontrol->private_value;
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	int ret;
+
+	if (codec->using_regmap)
+		ret = regmap_raw_read(codec->control_data, params->base,
+				      ucontrol->value.bytes.data,
+				      params->num_regs * codec->val_bytes);
+	else
+		ret = -EINVAL;
+
+	/* Hide any masked bytes to ensure consistent data reporting */
+	if (ret == 0 && params->mask) {
+		switch (codec->val_bytes) {
+		case 1:
+			ucontrol->value.bytes.data[0] &= ~params->mask;
+			break;
+		case 2:
+			((u16 *)(&ucontrol->value.bytes.data))[0]
+				&= ~params->mask;
+			break;
+		case 4:
+			((u32 *)(&ucontrol->value.bytes.data))[0]
+				&= ~params->mask;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(snd_soc_bytes_get);
+
+int snd_soc_bytes_put(struct snd_kcontrol *kcontrol,
+		      struct snd_ctl_elem_value *ucontrol)
+{
+	struct soc_bytes *params = (void *)kcontrol->private_value;
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	int ret, len;
+	unsigned int val;
+	void *data;
+
+	if (!codec->using_regmap)
+		return -EINVAL;
+
+	data = ucontrol->value.bytes.data;
+	len = params->num_regs * codec->val_bytes;
+
+	/*
+	 * If we've got a mask then we need to preserve the register
+	 * bits.  We shouldn't modify the incoming data so take a
+	 * copy.
+	 */
+	if (params->mask) {
+		ret = regmap_read(codec->control_data, params->base, &val);
+		if (ret != 0)
+			return ret;
+
+		val &= params->mask;
+
+		data = kmemdup(data, len, GFP_KERNEL);
+		if (!data)
+			return -ENOMEM;
+
+		switch (codec->val_bytes) {
+		case 1:
+			((u8 *)data)[0] &= ~params->mask;
+			((u8 *)data)[0] |= val;
+			break;
+		case 2:
+			((u16 *)data)[0] &= cpu_to_be16(~params->mask);
+			((u16 *)data)[0] |= cpu_to_be16(val);
+			break;
+		case 4:
+			((u32 *)data)[0] &= cpu_to_be32(~params->mask);
+			((u32 *)data)[0] |= cpu_to_be32(val);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	ret = regmap_raw_write(codec->control_data, params->base,
+			       data, len);
+
+	if (params->mask)
+		kfree(data);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(snd_soc_bytes_put);
+#endif
 
 /**
  * snd_soc_dai_set_sysclk - configure DAI system or master clock.
@@ -3243,13 +3543,14 @@ int snd_soc_register_card(struct snd_soc_card *card)
 	mutex_init(&card->mutex);
 	mutex_init(&card->dpcm_mutex);
 	mutex_init(&card->dapm_power_mutex);
+	mutex_init(&card->dapm_mutex);
+	ret = snd_soc_instantiate_card(card);
+	if (ret != 0) {
+		soc_cleanup_card_debugfs(card);
+		if (card->rtd)
+			kfree(card->rtd);
+	}
 
-	mutex_lock(&client_mutex);
-	list_add(&card->list, &card_list);
-	snd_soc_instantiate_cards();
-	mutex_unlock(&client_mutex);
-
-	dev_dbg(card->dev, "Registered card '%s'\n", card->name);
 
 	return ret;
 }
@@ -3265,9 +3566,6 @@ int snd_soc_unregister_card(struct snd_soc_card *card)
 {
 	if (card->instantiated)
 		soc_cleanup_card_resources(card);
-	mutex_lock(&client_mutex);
-	list_del(&card->list);
-	mutex_unlock(&client_mutex);
 	dev_dbg(card->dev, "Unregistered card '%s'\n", card->name);
 
 	return 0;
@@ -3363,7 +3661,6 @@ int snd_soc_register_dai(struct device *dev,
 
 	mutex_lock(&client_mutex);
 	list_add(&dai->list, &dai_list);
-	snd_soc_instantiate_cards();
 	mutex_unlock(&client_mutex);
 
 	pr_debug("Registered DAI '%s'\n", dai->name);
@@ -3445,9 +3742,6 @@ int snd_soc_register_dais(struct device *dev,
 		pr_debug("Registered DAI '%s'\n", dai->name);
 	}
 
-	mutex_lock(&client_mutex);
-	snd_soc_instantiate_cards();
-	mutex_unlock(&client_mutex);
 	return 0;
 
 err:
@@ -3504,7 +3798,6 @@ int snd_soc_register_platform(struct device *dev,
 
 	mutex_lock(&client_mutex);
 	list_add(&platform->list, &platform_list);
-	snd_soc_instantiate_cards();
 	mutex_unlock(&client_mutex);
 
 	pr_debug("Registered platform '%s'\n", platform->name);
@@ -3571,6 +3864,17 @@ static void fixup_codec_formats(struct snd_soc_pcm_stream *stream)
 		if (stream->formats & codec_format_map[i])
 			stream->formats |= codec_format_map[i];
 }
+
+/**
+ * snd_soc_card_change_online_state - Mark if soc card is online/offline
+ *
+ * @soc_card : soc_card to mark
+ */
+void snd_soc_card_change_online_state(struct snd_soc_card *soc_card, int online)
+{
+	snd_card_change_online_state(soc_card->snd_card, online);
+}
+EXPORT_SYMBOL(snd_soc_card_change_online_state);
 
 /**
  * snd_soc_register_codec - Register a codec with the ASoC core
@@ -3662,7 +3966,6 @@ int snd_soc_register_codec(struct device *dev,
 
 	mutex_lock(&client_mutex);
 	list_add(&codec->list, &codec_list);
-	snd_soc_instantiate_cards();
 	mutex_unlock(&client_mutex);
 
 	pr_debug("Registered codec '%s'\n", codec->name);

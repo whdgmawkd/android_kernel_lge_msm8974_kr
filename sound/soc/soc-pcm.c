@@ -498,9 +498,8 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
 		} else {
 			/* start delayed pop wq here for playback streams */
 			codec_dai->pop_wait = 1;
-			queue_delayed_work(system_power_efficient_wq,
-					   &rtd->delayed_work,
-					   msecs_to_jiffies(rtd->pmdown_time));
+			schedule_delayed_work(&rtd->delayed_work,
+				msecs_to_jiffies(rtd->pmdown_time));
 		}
 	} else {
 		/* capture streams can be powered down now */
@@ -533,6 +532,11 @@ static int soc_pcm_prepare(struct snd_pcm_substream *substream)
 	int ret = 0;
 
 	mutex_lock_nested(&rtd->pcm_mutex, rtd->pcm_subclass);
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		snd_soc_dapm_stream_event(rtd,
+		codec_dai->driver->playback.stream_name,
+		SND_SOC_DAPM_STREAM_START);
 
 	if (rtd->dai_link->ops && rtd->dai_link->ops->prepare) {
 		ret = rtd->dai_link->ops->prepare(substream);
@@ -573,19 +577,22 @@ static int soc_pcm_prepare(struct snd_pcm_substream *substream)
 		cancel_delayed_work(&rtd->delayed_work);
 	}
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		snd_soc_dapm_stream_event(rtd,
-					  codec_dai->driver->playback.stream_name,
-					  SND_SOC_DAPM_STREAM_START);
-	else {
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
 		if (codec_dai->capture_active == 1)
 			snd_soc_dapm_stream_event(rtd,
-					  codec_dai->driver->capture.stream_name,
-					  SND_SOC_DAPM_STREAM_START);
+			codec_dai->driver->capture.stream_name,
+			SND_SOC_DAPM_STREAM_START);
 	}
 	snd_soc_dai_digital_mute(codec_dai, 0);
 
 out:
+	if (ret < 0 && substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		pr_err("%s: Issue stop stream for codec_dai due to op failure %d = ret\n",
+		__func__, ret);
+		snd_soc_dapm_stream_event(rtd,
+		codec_dai->driver->playback.stream_name,
+		SND_SOC_DAPM_STREAM_STOP);
+	}
 	mutex_unlock(&rtd->pcm_mutex);
 	return ret;
 }
@@ -1250,7 +1257,6 @@ static int soc_dpcm_fe_dai_startup(struct snd_pcm_substream *fe_substream)
 	struct snd_pcm_runtime *runtime = fe_substream->runtime;
 	int stream = fe_substream->stream, ret = 0;
 
-	mutex_lock(&fe->card->dpcm_mutex);
 	fe->dpcm[stream].runtime_update = SND_SOC_DPCM_UPDATE_FE;
 
 	ret = dpcm_be_dai_startup(fe, fe_substream->stream);
@@ -1274,14 +1280,12 @@ static int soc_dpcm_fe_dai_startup(struct snd_pcm_substream *fe_substream)
 	snd_pcm_limit_hw_rates(runtime);
 
 	fe->dpcm[stream].runtime_update = SND_SOC_DPCM_UPDATE_NO;
-	mutex_unlock(&fe->card->dpcm_mutex);
 	return 0;
 
 unwind:
 	soc_dpcm_be_dai_startup_unwind(fe, fe_substream->stream);
 be_err:
 	fe->dpcm[stream].runtime_update = SND_SOC_DPCM_UPDATE_NO;
-	mutex_unlock(&fe->card->dpcm_mutex);
 	return ret;
 }
 
@@ -1329,7 +1333,6 @@ static int soc_dpcm_fe_dai_shutdown(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *fe = substream->private_data;
 	int stream = substream->stream;
 
-	mutex_lock(&fe->card->dpcm_mutex);
 	fe->dpcm[stream].runtime_update = SND_SOC_DPCM_UPDATE_FE;
 	
 	dev_dbg(fe->dev, "dpcm: close FE %s\n", fe->dai_link->name);
@@ -1352,7 +1355,6 @@ static int soc_dpcm_fe_dai_shutdown(struct snd_pcm_substream *substream)
 	fe->dpcm[stream].state = SND_SOC_DPCM_STATE_CLOSE;
 	fe->dpcm[stream].runtime_update = SND_SOC_DPCM_UPDATE_NO;
 
-	mutex_unlock(&fe->card->dpcm_mutex);
 	return 0;
 }
 
@@ -1709,23 +1711,20 @@ int soc_dpcm_fe_dai_prepare(struct snd_pcm_substream *substream)
 	}
 
 	ret = dpcm_be_dai_prepare(fe, substream->stream);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(fe->dev, "ASoC: prepare FE %s failed\n",
+						fe->dai_link->name);
 		goto out;
+	}
 
 	/* call prepare on the frontend */
 	if (!fe->fe_compr) {
 		ret = soc_pcm_prepare(substream);
 		if (ret < 0) {
-			dev_err(fe->dev,"ASoC: prepare FE %s failed\n",
+			dev_err(fe->dev, "ASoC: prepare FE %s failed\n",
 							fe->dai_link->name);
 			goto out;
 		}
-	}
-
-	ret = soc_pcm_prepare(substream);
-	if (ret < 0) {
-		dev_err(fe->dev,"dpcm: prepare FE %s failed\n", fe->dai_link->name);
-		goto out;
 	}
 
 	/* run the stream event for each BE */
@@ -2436,12 +2435,14 @@ int soc_dpcm_fe_dai_open(struct snd_pcm_substream *fe_substream)
 	int ret;
 	int stream = fe_substream->stream;
 
+	mutex_lock(&fe->card->dpcm_mutex);
 	fe->dpcm[stream].runtime = fe_substream->runtime;
 
 	if (dpcm_path_get(fe, stream, &list) <= 0) {
 		dev_warn(fe->dev, "asoc: %s no valid %s route from source to sink\n",
 			fe->dai_link->name, stream ? "capture" : "playback");
-			return -EINVAL;
+		mutex_unlock(&fe->card->dpcm_mutex);
+		return -EINVAL;
 	}
 
 	/* calculate valid and active FE <-> BE dpcm_paramss */
@@ -2459,6 +2460,7 @@ int soc_dpcm_fe_dai_open(struct snd_pcm_substream *fe_substream)
 
 	dpcm_clear_pending_state(fe, stream);
 	dpcm_path_put(&list);
+	mutex_unlock(&fe->card->dpcm_mutex);
 	return ret;
 }
 
@@ -2469,6 +2471,7 @@ int soc_dpcm_fe_dai_close(struct snd_pcm_substream *fe_substream)
 	struct snd_soc_dpcm_params *dpcm_params;
 	int stream = fe_substream->stream, ret;
 
+	mutex_lock(&fe->card->dpcm_mutex);
 	ret = soc_dpcm_fe_dai_shutdown(fe_substream);
 
 	/* mark FE's links ready to prune */
@@ -2478,7 +2481,7 @@ int soc_dpcm_fe_dai_close(struct snd_pcm_substream *fe_substream)
 	dpcm_be_disconnect(fe, stream);
 
 	fe->dpcm[stream].runtime = NULL;
-
+	mutex_unlock(&fe->card->dpcm_mutex);
 	return ret;
 }
 
