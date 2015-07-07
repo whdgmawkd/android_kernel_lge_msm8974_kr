@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
 *
 * This program is free software; you can redistribute it and/or modify
 * it under the terms of the GNU General Public License version 2 and
@@ -579,6 +579,15 @@ struct adm_cmd_matrix_mute_v5 {
 	/* Clients must set this field to zero.*/
 } __packed;
 
+#define ASM_PARAM_ID_AAC_STEREO_MIX_COEFF_SELECTION_FLAG_V2 (0x00010DD8)
+
+struct asm_aac_stereo_mix_coeff_selection_param_v2 {
+	struct apr_hdr          hdr;
+	u32                     param_id;
+	u32                     param_size;
+	u32                     aac_stereo_mix_coeff_flag;
+} __packed;
+
 /* Allows a client to connect the desired stream to
  * the desired AFE port through the stream router
  *
@@ -643,7 +652,6 @@ struct adm_cmd_connect_afe_port_v5 {
 #define RSVD_2 9
 #define RSVD_3 10
 #define DIGI_MIC_TX 11
-#define GLOBAL_CFG 12
 #define VOICE2_PLAYBACK_TX 0x8002
 #define VOICE_RECORD_RX 0x8003
 #define VOICE_RECORD_TX 0x8004
@@ -1031,6 +1039,29 @@ struct afe_loopback_cfg_v1 {
  */
 
 } __packed;
+
+#ifdef CONFIG_SND_SOC_CS35L32
+#define AFE_MODULE_RTIP_ENABLE         	0x000101FF
+#define AFE_PARAM_RTIP_ENABLE          	0x000102FF
+#define AFE_PARAM_RTIP_DEBUG		0x00010300
+#define AFE_PARAM_RTIP_PERF		0x00010301
+
+/*  Payload of the #AFE_PARAM_ID_LOOPBACK_CONFIG ,
+ * which enables/disables one AFE loopback.
+ */
+struct afe_param_rtip_enable {
+       u16 enable;
+       u16 reserved;
+} __attribute__ ((packed));
+
+
+struct afe_rtip_v1 {
+	struct apr_hdr	hdr;
+	struct afe_port_cmd_set_param_v2 param;
+	struct afe_port_param_data_v2    pdata;
+	struct afe_param_rtip_enable	 rtip_t;
+} __packed;
+#endif
 
 #define AFE_MODULE_SPEAKER_PROTECTION	0x00010209
 #define AFE_PARAM_ID_SPKR_PROT_CONFIG	0x0001020a
@@ -1969,6 +2000,14 @@ struct afe_param_id_pseudo_port_cfg {
 	 */
 } __packed;
 
+#define AFE_PARAM_ID_DEVICE_HW_DELAY     0x00010243
+#define AFE_API_VERSION_DEVICE_HW_DELAY  0x1
+
+struct afe_param_id_device_hw_delay_cfg {
+	uint32_t    device_hw_delay_minor_version;
+	uint32_t    delay_in_us;
+} __packed;
+
 union afe_port_config {
 	struct afe_param_id_pcm_cfg               pcm;
 	struct afe_param_id_i2s_cfg               i2s;
@@ -1977,6 +2016,7 @@ union afe_port_config {
 	struct afe_param_id_rt_proxy_port_cfg     rtproxy;
 	struct afe_param_id_internal_bt_fm_cfg    int_bt_fm;
 	struct afe_param_id_pseudo_port_cfg       pseudo_port;
+	struct afe_param_id_device_hw_delay_cfg   hw_delay;
 } __packed;
 
 struct afe_audioif_config_command_no_payload {
@@ -2247,6 +2287,7 @@ struct afe_port_cmdrsp_get_param_v2 {
 #define VPM_TX_SM_ECNS_COPP_TOPOLOGY			0x00010F71
 #define VPM_TX_DM_FLUENCE_COPP_TOPOLOGY			0x00010F72
 #define VPM_TX_QMIC_FLUENCE_COPP_TOPOLOGY		0x00010F75
+#define VPM_TX_DM_RFECNS_COPP_TOPOLOGY			0x00010F86
 
 /* Memory map regions command payload used by the
  * #ASM_CMD_SHARED_MEM_MAP_REGIONS ,#ADM_CMD_SHARED_MEM_MAP_REGIONS
@@ -2481,6 +2522,12 @@ struct asm_softvolume_params {
 #define ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2 0x00010DA5
 
 #define ASM_STREAM_POSTPROC_TOPO_ID_DEFAULT 0x00010BE4
+
+#define ASM_STREAM_POSTPROC_TOPO_ID_NONE 0x00010C68
+
+#if defined(CONFIG_SND_LGE_EFFECT) || defined(CONFIG_SND_LGE_NORMALIZER) || defined(CONFIG_SND_LGE_MABL)
+#define ASM_STREAM_POSTPROC_TOPO_ID_DEFAULT_LGE 0x10009009
+#endif
 
 #define ASM_MEDIA_FMT_EVRCB_FS 0x00010BEF
 
@@ -3666,6 +3713,7 @@ struct asm_session_cmd_run_v2 {
 } __packed;
 
 #define ASM_SESSION_CMD_PAUSE 0x00010BD3
+#define ASM_SESSION_CMD_SUSPEND 0x00010DEC
 #define ASM_SESSION_CMD_GET_SESSIONTIME_V3 0x00010D9D
 #define ASM_SESSION_CMD_REGISTER_FOR_RX_UNDERFLOW_EVENTS 0x00010BD5
 
@@ -4299,7 +4347,6 @@ struct asm_aac_sbr_ps_flag_param {
 struct asm_aac_dual_mono_mapping_param {
 	struct apr_hdr							hdr;
 	struct asm_stream_cmd_set_encdec_param	encdec;
-	struct asm_enc_cfg_blk_param_v2			encblk;
 	u16    left_channel_sce;
 	u16    right_channel_sce;
 
@@ -6864,6 +6911,7 @@ struct afe_param_id_clip_bank_sel {
 #define Q6AFE_LPASS_IBIT_CLK_1_P024_MHZ		 0xFA000
 #define Q6AFE_LPASS_IBIT_CLK_768_KHZ		 0xBB800
 #define Q6AFE_LPASS_IBIT_CLK_512_KHZ		 0x7D000
+#define Q6AFE_LPASS_IBIT_CLK_256_KHZ		 0x3E800
 #define Q6AFE_LPASS_IBIT_CLK_DISABLE		     0x0
 
 /* Supported LPASS CLK sources */
@@ -7146,6 +7194,11 @@ struct afe_port_cmd_set_aanc_acdb_table {
 /* Dolby DAP topology */
 #define DOLBY_ADM_COPP_TOPOLOGY_ID	0x0001033B
 
+/* RMS value from DSP */
+#define RMS_MODULEID_APPI_PASSTHRU  0x10009011
+#define RMS_PARAM_FIRST_SAMPLE 0x10009012
+#define RMS_PAYLOAD_LEN 4
+
 struct afe_svc_cmd_set_clip_bank_selection {
 	struct apr_hdr hdr;
 	struct afe_svc_cmd_set_param param;
@@ -7154,8 +7207,10 @@ struct afe_svc_cmd_set_clip_bank_selection {
 } __packed;
 
 /* Ultrasound supported formats */
-#define US_POINT_EPOS_FORMAT 0x00012310
-#define US_RAW_FORMAT        0x0001127C
-#define US_PROX_FORMAT       0x0001272B
+#define US_POINT_EPOS_FORMAT_V2 0x0001272D
+#define US_RAW_FORMAT_V2        0x0001272C
+#define US_PROX_FORMAT_V4       0x0001273B
+#define US_RAW_SYNC_FORMAT      0x0001272F
+#define US_GES_SYNC_FORMAT      0x00012730
 
 #endif /*_APR_AUDIO_V2_H_ */

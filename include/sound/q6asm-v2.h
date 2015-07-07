@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,6 +13,7 @@
 #define __Q6_ASM_V2_H__
 
 #include <mach/qdsp6v2/apr.h>
+#include <mach/qdsp6v2/rtac.h>
 #include <sound/apr_audio-v2.h>
 #include <linux/list.h>
 #include <linux/msm_ion.h>
@@ -53,6 +54,7 @@
 #define CMD_EOS            0x0003
 #define CMD_CLOSE          0x0004
 #define CMD_OUT_FLUSH      0x0005
+#define CMD_SUSPEND        0x0006
 
 /* bit 0:1 represents priority of stream */
 #define STREAM_PRIORITY_NORMAL	0x0000
@@ -99,7 +101,7 @@
 #define READDONE_IDX_SEQ_ID 10
 
 #define SOFT_PAUSE_PERIOD       30   /* ramp up/down for 30ms    */
-#define SOFT_PAUSE_STEP         2000 /* Step value 2ms or 2000us */
+#define SOFT_PAUSE_STEP         0 /* Step value 0ms or 0us */
 enum {
 	SOFT_PAUSE_CURVE_LINEAR = 0,
 	SOFT_PAUSE_CURVE_EXP,
@@ -107,7 +109,7 @@ enum {
 };
 
 #define SOFT_VOLUME_PERIOD       30   /* ramp up/down for 30ms    */
-#define SOFT_VOLUME_STEP         2000 /* Step value 2ms or 2000us */
+#define SOFT_VOLUME_STEP         0 /* Step value 0ms or 0us */
 enum {
 	SOFT_VOLUME_CURVE_LINEAR = 0,
 	SOFT_VOLUME_CURVE_EXP,
@@ -163,6 +165,7 @@ struct audio_client {
 	/* Relative or absolute TS */
 	atomic_t	       time_flag;
 	atomic_t	       nowait_cmd_cnt;
+	atomic_t               mem_state;
 	void		       *priv;
 	uint32_t               io_mode;
 	uint64_t	       time_stamp;
@@ -174,10 +177,13 @@ struct audio_client {
 	struct audio_port_data port[2];
 	wait_queue_head_t      cmd_wait;
 	wait_queue_head_t      time_wait;
-	bool                   perf_mode;
+	wait_queue_head_t      mem_wait;
+	int                    perf_mode;
 	int					   stream_id;
 	/* audio cache operations fptr*/
 	int (*fptr_cache_ops)(struct audio_buffer *abuff, int cache_op);
+	atomic_t               unmap_cb_success;
+	atomic_t               reset;
 };
 
 void q6asm_audio_client_free(struct audio_client *ac);
@@ -201,6 +207,9 @@ int q6asm_audio_client_buf_free_contiguous(unsigned int dir,
 
 int q6asm_open_read(struct audio_client *ac, uint32_t format
 		/*, uint16_t bits_per_sample*/);
+
+int q6asm_open_read_v2(struct audio_client *ac, uint32_t format,
+			uint16_t bits_per_sample);
 
 int q6asm_open_write(struct audio_client *ac, uint32_t format
 		/*, uint16_t bits_per_sample*/);
@@ -240,6 +249,10 @@ int q6asm_memory_unmap(struct audio_client *ac, uint32_t buf_add,
 							int dir);
 
 int q6asm_unmap_cal_blocks(void);
+
+int q6asm_map_rtac_block(struct rtac_cal_block_data *cal_block);
+
+int q6asm_unmap_rtac_block(uint32_t *mem_map_handle);
 
 int q6asm_run(struct audio_client *ac, uint32_t flags,
 		uint32_t msw_ts, uint32_t lsw_ts);
@@ -281,6 +294,10 @@ int q6asm_enc_cfg_blk_aac(struct audio_client *ac,
 
 int q6asm_enc_cfg_blk_pcm(struct audio_client *ac,
 			uint32_t rate, uint32_t channels);
+
+int q6asm_enc_cfg_blk_pcm_format_support(struct audio_client *ac,
+			uint32_t rate, uint32_t channels,
+			uint16_t bits_per_sample);
 
 int q6asm_set_encdec_chan_map(struct audio_client *ac,
 		uint32_t num_channels);

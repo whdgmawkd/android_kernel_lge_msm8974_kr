@@ -92,7 +92,8 @@ enum afe_mad_type {
 	MAD_HW_NONE = 0x00,
 	MAD_HW_AUDIO = 0x01,
 	MAD_HW_BEACON = 0x02,
-	MAD_HW_ULTRASOUND = 0x04
+	MAD_HW_ULTRASOUND = 0x04,
+	MAD_SW_AUDIO = 0x05,
 };
 
 struct afe_audio_buffer {
@@ -203,4 +204,7 @@ void afe_clear_config(enum afe_config_type config);
 bool afe_has_config(enum afe_config_type config);
 
 void afe_set_aanc_info(struct aanc_data *aanc_info);
+#ifdef CONFIG_SND_SOC_CS35L32
+int q6afe_set_rtip(int enable);
+#endif /* CONFIG_SND_SOC_CS35L32 */
 #endif /* __Q6AFE_V2_H__ */
