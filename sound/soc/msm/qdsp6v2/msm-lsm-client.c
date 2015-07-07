@@ -128,12 +128,9 @@ static int msm_lsm_ioctl(struct snd_pcm_substream *substream,
 						snd_model.min_keyw_confidence,
 						snd_model.min_user_confidence,
 						snd_model.detect_failure);
-		if (rc < 0) {
+		if (rc < 0)
 			pr_err("%s: q6lsm_register_sound_model failed =%d\n",
 			       __func__, rc);
-			q6lsm_snd_model_buf_free(prtd->lsm_client);
-		}
-
 		break;
 
 	case SNDRV_LSM_DEREG_SND_MODEL:
@@ -170,9 +167,6 @@ static int msm_lsm_ioctl(struct snd_pcm_substream *substream,
 				 */
 				rc = -EFAULT;
 			} else {
-				if (!access_ok(VERIFY_READ, user,
-					sizeof(struct snd_lsm_event_status)))
-					rc = -EFAULT;
 				if (user->payload_size <
 				    event_status->payload_size) {
 					pr_debug("%s: provided %dbytes isn't enough, needs %dbytes\n",
@@ -222,7 +216,7 @@ static int msm_lsm_ioctl(struct snd_pcm_substream *substream,
 			if (!ret)
 				pr_debug("%s: LSM client session stopped %d\n",
 					 __func__, ret);
-			prtd->lsm_client->started = false;
+				prtd->lsm_client->started = false;
 		}
 		break;
 
@@ -284,32 +278,8 @@ static int msm_lsm_close(struct snd_pcm_substream *substream)
 	unsigned long flags;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct lsm_priv *prtd = runtime->private_data;
-	int ret = 0;
 
 	pr_debug("%s\n", __func__);
-	if (prtd->lsm_client->started) {
-		ret = q6lsm_stop(prtd->lsm_client, true);
-		if (ret)
-			pr_err("%s: session stop failed, err = %d\n",
-				__func__, ret);
-		else
-			pr_debug("%s: LSM client session stopped %d\n",
-				 __func__, ret);
-
-		/*
-		 * Go Ahead and try de-register sound model,
-		 * even if stop failed
-		 */
-		prtd->lsm_client->started = false;
-
-		ret = q6lsm_deregister_sound_model(prtd->lsm_client);
-		if (ret)
-			pr_err("%s: dereg_snd_model failed, err = %d\n",
-				__func__, ret);
-		else
-			pr_debug("%s: dereg_snd_model succesful\n",
-				 __func__);
-	}
 
 	q6lsm_close(prtd->lsm_client);
 	q6lsm_client_free(prtd->lsm_client);

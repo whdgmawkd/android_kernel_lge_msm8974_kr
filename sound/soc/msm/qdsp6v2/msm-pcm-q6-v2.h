@@ -69,7 +69,6 @@ struct msm_audio {
 
 	int abort; /* set when error, like sample rate mismatch */
 
-        bool reset_event;
 	int enabled;
 	int close_ack;
 	int cmd_ack;
@@ -93,7 +92,6 @@ struct msm_audio {
 	bool set_channel_map;
 	char channel_map[8];
 	int cmd_interrupt;
-	bool meta_data_mode;
 	uint32_t volume;
 };
 
