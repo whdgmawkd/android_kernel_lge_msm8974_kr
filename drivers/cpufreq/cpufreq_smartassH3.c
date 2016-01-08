@@ -39,6 +39,15 @@
 #include <asm/cputime.h>
 #include <linux/earlysuspend.h>
 
+/*
+* port of cputime.h
+*/
+#define cputime64_add(__a, __b) ((__a) + (__b))
+#define cputime64_sub(__a, __b) ((__a) - (__b))
+/*
+*end of port
+*/
+
 
 /******************** Tunable parameters: ********************/
 
@@ -806,7 +815,7 @@ static void smartass_suspend(int cpu, int suspend)
 	reset_timer(smp_processor_id(),this_smartass);
 }
 
-static void smartass_early_suspend(struct early_suspend *handler) {
+inline static void smartass_early_suspend(struct early_suspend *handler) { 
 	int i;
 	if (suspended || sleep_ideal_freq==0) // disable behavior for sleep_ideal_freq==0
 		return;
@@ -815,7 +824,7 @@ static void smartass_early_suspend(struct early_suspend *handler) {
 		smartass_suspend(i,1);
 }
 
-static void smartass_late_resume(struct early_suspend *handler) {
+inline static void smartass_late_resume(struct early_suspend *handler) { 
 	int i;
 	if (!suspended) // already not suspended so nothing to do
 		return;
